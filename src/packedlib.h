@@ -542,7 +542,8 @@ protected:
 };
 
 
-template<typename S, typename T, typename Distance, typename DataMapper = MMapDataMapper>
+template<typename S, typename T, typename Distance, typename DataMapper = MMapDataMapper, 
+  template<class> class RAlloc = std::allocator >
 class PackedAnnoySearcher {
     /*
      This is AnnoyIndex class divided into indexer and searcher
@@ -551,6 +552,9 @@ class PackedAnnoySearcher {
      Also this two classes provided different nodes packing scheme
      including float[-1:+1] to uint16 pack
      Some stats: packs about to 1.8x or more of original annoy index!
+     INFO: you can bypass more dTLB misses when using HugePages allocator 
+           for your storage or/and temporary buffers via custom RAlloc.
+           see: clone() and other examples.
    */
 public:
   typedef Distance D;
@@ -562,8 +566,8 @@ private:
   static constexpr S const _K_mask = S(1UL) << S(sizeof(S) * 8 - 1);
   static constexpr S const _K_mask_clear = _K_mask - 1;
 protected:
-  typedef std::pair<T, S>               qpair_t;
-  typedef std::vector<qpair_t>          queue_t;
+  typedef std::pair<T, S>                       qpair_t;
+  typedef std::vector<qpair_t, RAlloc<qpair_t>> queue_t;
 protected:
   S _f;
   S _s; // Size of each node
@@ -576,20 +580,13 @@ protected:
 public:
 
   PackedAnnoySearcher(DataMapper && mapper = DataMapper())
-    : _f(0)
-    , _s(0)
-    , _K(0)
-    , _n_items(0)
-    , _nodes(nullptr)
-    , _mapper(std::move(mapper))
-  {
+    : _f(0), _s(0), _K(0), _n_items(0), _nodes(nullptr), _mapper(std::move(mapper)) {
     // check size of node must be multiply of 16
     if( _s % 16 )
       throw std::runtime_error("size of the node must be multiply of 16 bytes, consider using different config!");
   }
 
-  ~PackedAnnoySearcher()
-  {
+  ~PackedAnnoySearcher() {
     _mapper.unmap(_mapping);
   }
 
@@ -598,8 +595,7 @@ public:
   // this function completely clone memory storages
   // this can be useful to avoid memory bank conflicts and offcore-loads
   // but it's too dangerous to regular user, so don't use me if you not Jedi, sorry...
-  PackedAnnoySearcher* clone() const
-  {
+  PackedAnnoySearcher* clone() const {
     std::unique_ptr<PackedAnnoySearcher> n{ new PackedAnnoySearcher() };
     if( nullptr == _nodes )
       throw std::runtime_error("index must be loaded!");
@@ -793,7 +789,6 @@ private:
 
   inline Node* _get(S i) const {
     Node *nd = get_node_ptr<S, Node>(_nodes, _s, i);
-    __builtin_prefetch(nd);
     return nd;
   }
 
@@ -802,19 +797,21 @@ private:
   }
 
   template<typename Filter>
-  void _get_all_nns(const Node* v_node, size_t n, S search_k, vector<pair<T, S> > &nns_dist,
+  void _get_all_nns(const Node* v_node, size_t n, S search_k, queue_t &nns_dist,
                     Filter filter) const {
     if (search_k == (S)-1)
       search_k = n * _roots_q.size(); // slightly arbitrary default value
-    // alloc node-ids temporary search buffer on the heap
-    // TODO: this is little faster than using stack,
-    // but consider using preallocated memory buffer instead!
-    std::unique_ptr<S[]> nns( new S[search_k + _K * 2]);
+    // get memory from the same allocator as queue buffer
+    // to reduce dTLB misses YOU can use special THP allocator
+    // to feet all temporary data into one page!
+    RAlloc<S> alloc;
+    size_t const max_nns_elements = search_k + _K * 2;
+    S *nns = alloc.allocate(max_nns_elements);
     // copy prepared queue with roots
-    queue_t q;
+    queue_t &q = nns_dist;
     // reduce realloc overhead
     // TODO: dTLB high pressure during scan loop, so decide to use HP for temp and output buffers!
-    q.reserve( n * _roots_q.size() );
+    q.reserve( std::max(n * _roots_q.size(), max_nns_elements) );
     q.assign(_roots_q.begin(), _roots_q.end());
     S nns_cnt = 0;
     // collect candidates ID's w/o collecting weights to reduce bandwidth penalty
@@ -826,8 +823,7 @@ private:
       std::pop_heap(q.begin(), q.end());
       q.pop_back();
 
-      if( !(fi & _K_mask) )
-      {
+      if( !(fi & _K_mask) ) {
         // ordinal node
         Node* nd = _get(i);
         if (nd->n_descendants == 1 && i < _n_items) {
@@ -841,23 +837,25 @@ private:
           std::push_heap(q.begin(), q.end());
         }
       }
-      else
-      {
+      else {
         // index only node
         S const *idx = (S const*)_mapping.data + i * _K;
         __builtin_prefetch(idx);
-        S const *dst = idx + 1;
+        S const *src_i = idx + 1;
         void *dest = &nns[nns_cnt];
         nns_cnt += *idx;
-        memcpy(dest, dst, *idx * sizeof(S));
+        memcpy(dest, src_i, *idx * sizeof(S));
       }
       if( nns_cnt >= search_k )
         break;
     }
 
+    // use same list for traverse queue and results
+    // to save dTLB
+    q.clear();
+
     // sort by ID to eliminate dups
-    std::sort(nns.get(), nns.get() + nns_cnt);
-    nns_dist.reserve(nns_cnt);
+    std::sort(nns, nns + nns_cnt);
 
     S last = -1;
     // eliminate dups and calc distances
@@ -873,6 +871,8 @@ private:
           nns_dist.emplace_back(dist, j);
       }
     }
+
+    alloc.deallocate(nns, max_nns_elements);
 
     // resort by distance
     size_t m = nns_dist.size();

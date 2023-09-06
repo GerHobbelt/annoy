@@ -477,9 +477,9 @@ inline float decode_and_euclidean_distance_i16_f32_sse( uint16_t const *__restri
 
 inline void pack_float_vector_i16( float const *__restrict__ in, uint16_t *__restrict__ out, uint32_t d )
 {
-#if defined(AVX512)
+#if defined(USE_AVX512)
   pack_float_vector_i16_avx32(in, out, d);
-#elif defined(AVX2)
+#elif defined(USE_AVX2)
   pack_float_vector_i16_avx16(in, out, d);
 #else
   pack_float_vector_i16_sse(in, out, d);
@@ -488,21 +488,21 @@ inline void pack_float_vector_i16( float const *__restrict__ in, uint16_t *__res
 
 inline void decode_vector_i16_f32( uint16_t const *__restrict__ in, float *__restrict__ out, uint32_t d )
 {
-#if defined(AVX512)
+#if defined(USE_AVX512)
   decode_vector_i16_f32_avx32(in, out, d);
-#elif defined(AVX2)
+#elif defined(USE_AVX2)
   decode_vector_i16_f32_avx16(in, out, d);
 #else
-  return decode_vector_i16_f32_sse(in, out, d);
+  decode_vector_i16_f32_sse(in, out, d);
 #endif
 }
 
 inline float decode_and_dot_i16_f32( uint16_t const *__restrict__ in, float const *__restrict__ y, uint32_t d )
 {
-#if defined(AVX512)
-  decode_and_dot_i16_f32_avx32(in, y, d);
-#elif defined(AVX2)
-  decode_and_dot_i16_f32_avx16(in, y, d);
+#if defined(USE_AVX512)
+  return decode_and_dot_i16_f32_avx32(in, y, d);
+#elif defined(USE_AVX2)
+  return decode_and_dot_i16_f32_avx16(in, y, d);
 #else
   return decode_and_dot_i16_f32_sse(in, y, d);
 #endif
@@ -511,10 +511,10 @@ inline float decode_and_dot_i16_f32( uint16_t const *__restrict__ in, float cons
 
 inline float decode_and_euclidean_distance_i16_f32( uint16_t const *__restrict__ in, float const *__restrict__ y, uint32_t d )
 {
-#if defined(AVX512)
-  decode_and_euclidean_distance_i16_f32_avx32(in, y, d);
-#elif defined(AVX2)
-  decode_and_euclidean_distance_i16_f32_avx16(in, y, d);
+#if defined(USE_AVX512)
+  return decode_and_euclidean_distance_i16_f32_avx32(in, y, d);
+#elif defined(USE_AVX2)
+  return decode_and_euclidean_distance_i16_f32_avx16(in, y, d);
 #else
   return decode_and_euclidean_distance_i16_f32_sse(in, y, d);
 #endif
