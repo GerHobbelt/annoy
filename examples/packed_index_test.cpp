@@ -127,17 +127,21 @@ uint32_t search_with_filtering(PackedAnnoySearcher<uint32_t, float, DotProductPa
     size_t const search_k = (size_t)-1;
     uint32_t nfound = 0;
     std::vector<std::pair<float, uint32_t>> results;
-    for( uint32_t i = 0; i < nitems_for_test; ++i )
+    struct filter : PackedAnnoySearcher<uint32_t, float, DotProductPacked16>::default_filter
     {
-        results.clear();
-        searcher.get_nns_by_item_filter(i, depth, search_k, []( float &dist ) {
+        bool operator () ( float &dist ) const {
             // for DotProduct we must get abs to get real distance similarity
             dist = std::abs(dist);
             // also check for minimal quality
             if( dist > 0.8f )
                 return true;
             return false; // throw away this result!
-        }, results);
+        }
+    };
+    for( uint32_t i = 0; i < nitems_for_test; ++i )
+    {
+        results.clear();
+        searcher.get_nns_by_item_filter(i, depth, search_k, filter{}, results);
         // check results
         for( auto p : results )
         {
@@ -158,12 +162,12 @@ uint32_t search_with_filtering(PackedAnnoySearcher<uint32_t, float, EuclideanPac
 {
     size_t const search_k = (size_t)-1;
     uint32_t nfound = 0;
-    std::vector<std::pair<float, uint32_t>> results;
-    float const max_dist = 0.6f;
-    for( uint32_t i = 0; i < nitems_for_test; ++i )
+    struct filter : PackedAnnoySearcher<uint32_t, float, EuclideanPacked16>::default_filter
     {
-        results.clear();
-        searcher.get_nns_by_item_filter(i, depth, search_k, [max_dsqr = max_dist * max_dist]( float &dist ) {
+        float const max_dsqr;
+        filter( float max_dist ) : max_dsqr( max_dist * max_dist ) {}
+
+        bool operator () ( float &dist ) const {
             // for Euclidean we have squared distances here, so bound must be
             // squared before comparions!
             // also check for minimal quality
@@ -174,7 +178,14 @@ uint32_t search_with_filtering(PackedAnnoySearcher<uint32_t, float, EuclideanPac
                 return true;
             }
             return false; // throw away this result!
-        }, results);
+        }
+    };
+    std::vector<std::pair<float, uint32_t>> results;
+    float const max_dist = 0.6f;
+    for( uint32_t i = 0; i < nitems_for_test; ++i )
+    {
+        results.clear();
+        searcher.get_nns_by_item_filter(i, depth, search_k, filter{max_dist}, results);
         // check results
         for( auto p : results )
         {
@@ -410,6 +421,8 @@ void basic_packutils_test()
         float vlen = vlength(tvv);
         size_t const sz_packed = sizeof(uint16_t) * D;
         size_t const sz_unpacked = sizeof(float) * D;
+        (void)sz_packed;
+        (void)sz_unpacked;
         normalize(vlen, tvv);
         COMPARE_FL( vlength(tvv), 1.f, 0.0001f );
         pack_float_vector_i16(test_vector, packed, D);

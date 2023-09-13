@@ -562,6 +562,14 @@ public:
   typedef typename D::template Node<S, T> Node;
   typedef std::unique_ptr<Node, decltype( &free )> NodeUPtrType;
   typedef typename DataMapper::Mapping DataMapping;
+  struct default_filter
+  {
+      enum : bool { resort_by_distance = true };
+      bool operator () ( T dist ) const {
+        /* WARNING: dist are not normalized here! */
+        return true;
+      }
+  };
 private:
   static constexpr S const _K_mask = S(1UL) << S(sizeof(S) * 8 - 1);
   static constexpr S const _K_mask_clear = _K_mask - 1;
@@ -720,7 +728,7 @@ public:
     Node* v_node = mk_node(v, _f, node_alloc_buf);
 
     vector<pair<T, S> > nns_dist;
-    _get_all_nns(v_node, n, search_k, nns_dist, _just_bypass);
+    _get_all_nns(v_node, n, search_k, nns_dist, default_filter{});
     size_t p = std::min(nns_dist.size(), n);
     // prealloc result buffers
     result->reserve(p);
@@ -792,10 +800,6 @@ private:
     return nd;
   }
 
-  static bool _just_bypass( T dist ) {
-      return true;
-  }
-
   template<typename Filter>
   void _get_all_nns(const Node* v_node, size_t n, S search_k, queue_t &nns_dist,
                     Filter filter) const {
@@ -807,10 +811,8 @@ private:
     RAlloc<S> alloc;
     size_t const max_nns_elements = search_k + _K * 2;
     S *nns = alloc.allocate(max_nns_elements);
-    // copy prepared queue with roots
     queue_t &q = nns_dist;
-    // reduce realloc overhead
-    // TODO: dTLB high pressure during scan loop, so decide to use HP for temp and output buffers!
+    // copy prepared queue with roots
     q.reserve( std::max(n * _roots_q.size(), max_nns_elements) );
     q.assign(_roots_q.begin(), _roots_q.end());
     S nns_cnt = 0;
@@ -874,12 +876,15 @@ private:
 
     alloc.deallocate(nns, max_nns_elements);
 
-    // resort by distance
-    size_t m = nns_dist.size();
-    if( n < m ) // Has more than N results, so get only top N
-      std::partial_sort(nns_dist.begin(), nns_dist.begin() + n, nns_dist.end());
-    else
-      std::sort(nns_dist.begin(), nns_dist.end());
+    // resort by distance ?
+    if( Filter::resort_by_distance )
+    {
+      size_t m = nns_dist.size();
+      if( n < m ) // Has more than N results, so get only top N
+        std::partial_sort(nns_dist.begin(), nns_dist.begin() + n, nns_dist.end());
+      else
+        std::sort(nns_dist.begin(), nns_dist.end());
+    }
 
   }
 };
