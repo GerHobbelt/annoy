@@ -405,7 +405,7 @@ void basic_packutils_test()
     __attribute__ ((aligned (64))) uint16_t packed_avx32[512] = {0};
     __attribute__ ((aligned (64))) float unpacked_avx32[512] = {0};
     #endif
-     #if defined(USE_AVX2)
+    #if defined(USE_AVX2)
     __attribute__ ((aligned (16))) uint16_t packed_avx16[512] = {0};
     __attribute__ ((aligned (16))) float unpacked_avx16[512] = {0};
     #endif

@@ -209,6 +209,13 @@ inline float decode_and_euclidean_distance_i16_f32_avx32( uint16_t const *__rest
 
 #if defined(USE_AVX2)
 
+inline float _mm256_reduce_add_ps(__m256 x) {
+    __m128 x128 = _mm_add_ps(_mm256_extractf128_ps(x, 1), _mm256_castps256_ps128(x));
+    __m128 x64 = _mm_add_ps(x128, _mm_movehl_ps(x128, x128));
+    __m128 x32 = _mm_add_ss(x64, _mm_shuffle_ps(x64, x64, 0x55));
+    return _mm_cvtss_f32(x32);
+}
+
 inline void pack_float_vector_i16_avx16( float const *__restrict__ x, uint16_t *__restrict__ out, uint32_t d )
 {
   __m256 mm1 = _mm256_set1_ps(32767.f);
@@ -290,12 +297,7 @@ inline float decode_and_dot_i16_f32_avx16( uint16_t const *__restrict__ in, floa
       d -= 16;
   }
   msum1 = _mm256_add_ps(msum1, msum2);
-  // now sum of 8
-  msum1 = _mm256_hadd_ps (msum1, msum1);
-  msum1 = _mm256_hadd_ps (msum1, msum1);
-  // now 0 and 4 left
-  sum = _mm_cvtss_f32 (_mm256_castps256_ps128(msum1)) +
-            _mm_cvtss_f32 (_mm256_extractf128_ps(msum1, 1));
+  sum = _mm256_reduce_add_ps(msum1);
 
   if( d )
   {
@@ -345,12 +347,7 @@ inline float decode_and_euclidean_distance_i16_f32_avx16( uint16_t const *__rest
       d -= 16;
   }
   msum1 = _mm256_add_ps(msum1, msum2);
-  // now sum of 8
-  msum1 = _mm256_hadd_ps (msum1, msum1);
-  msum1 = _mm256_hadd_ps (msum1, msum1);
-  // now 0 and 4 left
-  sum = _mm_cvtss_f32 (_mm256_castps256_ps128(msum1)) +
-            _mm_cvtss_f32 (_mm256_extractf128_ps(msum1, 1));
+  sum = _mm256_reduce_add_ps(msum1);
 
   // here can be 0/8 left, so do check and calc tail if exists
   if( d )

@@ -570,12 +570,11 @@ public:
         return true;
       }
   };
+  typedef std::pair<T, S>                       qpair_t;
+  typedef std::vector<qpair_t, RAlloc<qpair_t>> queue_t;
 private:
   static constexpr S const _K_mask = S(1UL) << S(sizeof(S) * 8 - 1);
   static constexpr S const _K_mask_clear = _K_mask - 1;
-protected:
-  typedef std::pair<T, S>                       qpair_t;
-  typedef std::vector<qpair_t, RAlloc<qpair_t>> queue_t;
 protected:
   S _f;
   S _s; // Size of each node
