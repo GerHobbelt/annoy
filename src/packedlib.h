@@ -692,9 +692,7 @@ public:
     T *mv = static_cast<T*>(alloca_aligned(_f * sizeof(T)));
     const Node* m = _get(j);
     decode_vector_i16_f32((PackedFloatType const*)m->v, mv, _f);
-    void *node_alloc_buf = alloca_aligned(offsetof(Node, v) + _f * sizeof(T));
-    Node* v_node = mk_node(mv, _f, node_alloc_buf);
-    return D::normalized_distance(D::distance(_get(i), v_node, _f));
+    return D::normalized_distance(D::distance(_get(i), mv, _f));
   }
 
   void get_nns_by_item(S item, size_t n, size_t search_k, vector<S>* result, vector<T>* distances) const {
@@ -720,14 +718,8 @@ public:
   }
 
   void get_nns_by_vector(const T* v, size_t n, size_t search_k, vector<S>* result, vector<T>* distances) const {
-    // init node for comparison from given vector(v)
-    // alloc space for that node on the stack!
-    // but node vector(v[1]) data is need to be aligned to 16 bytes
-    void *node_alloc_buf = alloca_aligned(offsetof(Node, v) + _f * sizeof(T));
-    Node* v_node = mk_node(v, _f, node_alloc_buf);
-
-    vector<pair<T, S> > nns_dist;
-    _get_all_nns(v_node, n, search_k, nns_dist, default_filter{});
+    queue_t nns_dist;
+    _get_all_nns(v, n, search_k, nns_dist, default_filter{});
     size_t p = std::min(nns_dist.size(), n);
     // prealloc result buffers
     result->reserve(p);
@@ -750,19 +742,13 @@ public:
   // supported user-defined filtering
   // WARN: this version return raw-distance, you can normalize it in filter function!
   template<typename Filter>
-  void get_nns_by_vector_filter(const T* v, size_t n, size_t search_k, Filter filter, vector<pair<T, S> > &nns_dist) const {
-    // init node for comparison from given vector(v)
-    // alloc space for that node on the stack!
-    // but node vector(v[1]) data is need to be aligned to 16 bytes
-    void *node_alloc_buf = alloca_aligned(offsetof(Node, v) + _f * sizeof(T));
-    Node* v_node = mk_node(v, _f, node_alloc_buf);
-
-    _get_all_nns(v_node, n, search_k, nns_dist, filter);
+  void get_nns_by_vector_filter(const T* v, size_t n, size_t search_k, Filter filter, queue_t &nns_dist) const {
+    _get_all_nns(v, n, search_k, nns_dist, filter);
   }
 
   // same as above but referenced himself
   template<typename Filter>
-  void get_nns_by_item_filter(S item, size_t n, size_t search_k, Filter filter, vector<pair<T, S> > &nns_dist) const {
+  void get_nns_by_item_filter(S item, size_t n, size_t search_k, Filter filter, queue_t &nns_dist) const {
     T *mv = static_cast<T*>(alloca_aligned(_f * sizeof(T)));
     const Node* m = _get(item);
     decode_vector_i16_f32((PackedFloatType const*)m->v, mv, _f);
@@ -800,7 +786,7 @@ private:
   }
 
   template<typename Filter>
-  void _get_all_nns(const Node* v_node, size_t n, S search_k, queue_t &nns_dist,
+  void _get_all_nns(const T* v, size_t n, S search_k, queue_t &nns_dist,
                     Filter filter) const {
     if (search_k == (S)-1)
       search_k = n * _roots_q.size(); // slightly arbitrary default value
@@ -818,7 +804,7 @@ private:
     // collect candidates ID's w/o collecting weights to reduce bandwidth penalty
     // due to dups in candidates
     while( !q.empty() ) {
-      const pair<T, S>& top = q.front();
+      const qpair_t& top = q.front();
       T d = top.first;
       S fi = top.second, i = fi & _K_mask_clear;
       std::pop_heap(q.begin(), q.end());
@@ -831,7 +817,7 @@ private:
           nns[nns_cnt++] = i;
         } else {
           // split node
-          T margin = D::margin(nd, v_node->v, _f);
+          T margin = D::margin(nd, v, _f);
           q.emplace_back(D::pq_distance(d, margin, 1), S(nd->children[1]));
           std::push_heap(q.begin(), q.end());
           q.emplace_back(D::pq_distance(d, margin, 0), S(nd->children[0]));
@@ -841,7 +827,6 @@ private:
       else {
         // index only node
         S const *idx = (S const*)_mapping.data + i * _K;
-        __builtin_prefetch(idx);
         S const *src_i = idx + 1;
         void *dest = &nns[nns_cnt];
         nns_cnt += *idx;
@@ -867,7 +852,7 @@ private:
       last = j;
       Node const *nd = _get(j);
       if (nd->n_descendants == 1) { // This is only to guard a really obscure case, #284
-        T dist = D::distance(nd, v_node, _f);
+        T dist = D::distance(nd, v, _f);
         if( filter(dist) )
           nns_dist.emplace_back(dist, j);
       }
@@ -902,6 +887,11 @@ struct EuclideanPacked16 : Euclidean
   static inline T distance(const Node<S, T>* x, const Node<S, T>* y, int f) {
     return decode_and_euclidean_distance_i16_f32((PackedFloatType const*)x->v, y->v, f);
   }
+  // special version w/o copying
+  template<typename S, typename T>
+  static inline T distance(const Node<S, T>* x, const T* y, int f) {
+    return decode_and_euclidean_distance_i16_f32((PackedFloatType const*)x->v, y, f);
+  }
 
   template<typename S, typename T>
   static inline T margin(const Node<S, T>* n, const T* y, int f) {
@@ -919,6 +909,11 @@ struct DotProductPacked16 : DotProduct
   template<typename S, typename T>
   static inline T distance(const Node<S, T>* x, const Node<S, T>* y, int f) {
     return -decode_and_dot_i16_f32((PackedFloatType const*)x->v, y->v, f);
+  }
+  // special version w/o copying
+  template<typename S, typename T>
+  static inline T distance(const Node<S, T>* x, const T* y, int f) {
+    return -decode_and_dot_i16_f32((PackedFloatType const*)x->v, y, f);
   }
 
   template<typename S, typename T>
