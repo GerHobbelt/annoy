@@ -43,6 +43,11 @@ namespace detail {
     uint32_t nblocks;
   };
 
+  constexpr size_t align_size( size_t sz, size_t block_siz )
+  {
+      return (sz + block_siz - 1) & ~(block_siz - 1);
+  }
+
   static_assert( sizeof(Header) == 16, "header must 16 bytes long!");
 
 
@@ -70,15 +75,19 @@ namespace detail {
     FILE *f = nullptr;
   };
 
-  class MMapWriter
+  template<bool THP>
+  class MMapWriterImpl
   {
+    // THP tested only on x86_64 and Linux
+    static size_t constexpr HUGE_PAGE_SIZE = 1UL << 21; // 2M
+    static size_t constexpr HUGE_PAGE_SZ_MASK = HUGE_PAGE_SIZE - 1;
   public:
     typedef DataMapping Mapping;
   public:
-    ~MMapWriter() { destroy(); }
-    MMapWriter() = default;
-    MMapWriter( MMapWriter const& ) = delete;
-    MMapWriter( MMapWriter && o )
+    ~MMapWriterImpl() { destroy(); }
+    MMapWriterImpl() = default;
+    MMapWriterImpl( MMapWriterImpl const& ) = delete;
+    MMapWriterImpl( MMapWriterImpl && o )
       : maping(o.maping)
       , top(static_cast<uint8_t*>(o.maping))
       , size(o.size)
@@ -87,20 +96,46 @@ namespace detail {
         o.maping = nullptr;
     }
 
-    MMapWriter& operator == ( MMapWriter && ) = delete;
-    MMapWriter& operator == ( MMapWriter const & ) = delete;
-    bool open( char const */*filename*/, size_t calculated_size )
+    MMapWriterImpl& operator == ( MMapWriterImpl && ) = delete;
+    MMapWriterImpl& operator == ( MMapWriterImpl const & ) = delete;
+    bool open( char const */*filename*/, size_t sz )
     {
+      if( THP )
+        sz = align_size(sz, HUGE_PAGE_SIZE);
 
-      void *p = calculated_size ? mmap(0, calculated_size, PROT_READ | PROT_WRITE,
+      void *p = sz ? mmap(0, sz + (THP ? HUGE_PAGE_SIZE : 0), PROT_READ | PROT_WRITE,
                                       MAP_PRIVATE | MAP_ANONYMOUS, 0, 0)
                                 : nullptr;
       if( p == MAP_FAILED )
         return false;
 
-      maping = p;
-      top = static_cast<uint8_t*>(p);
-      size = calculated_size;
+      if( THP ) {
+        // align pointer to the HUGE_PAGE_SIZE
+        if( size_t(p) % HUGE_PAGE_SIZE ) {
+            void *aligned_mem = (void *) (((size_t)p + HUGE_PAGE_SZ_MASK) & ~HUGE_PAGE_SZ_MASK);
+            // free unaligned chunk of mem
+            size_t unaligned_chunk_sz = (size_t)aligned_mem - (size_t)p;
+            munmap(p, unaligned_chunk_sz);
+            maping = aligned_mem;
+            size = sz + HUGE_PAGE_SIZE - unaligned_chunk_sz;
+        }
+        else {
+            size = sz + HUGE_PAGE_SIZE;
+            maping = p;
+        }
+#if defined(MADV_HUGEPAGE)
+        madvise(p, calculated_size, MADV_HUGEPAGE);
+#endif
+      }
+      else {
+        maping = p;
+        top = static_cast<uint8_t*>(p);
+        size = sz;
+      }
+#if defined(MADV_HUGEPAGE)
+      if( THP )
+        madvise(p, calculated_size, MADV_HUGEPAGE);
+#endif
 
 #if defined(MADV_DONTDUMP)
       // Exclude from a core dump those pages
@@ -131,15 +166,15 @@ namespace detail {
 
     void* get_ptr() const { return maping; }
     size_t get_size() const { return size; }
-    
+
     Mapping clone( Mapping m ) const {
       return clone_mmap(m, MAP_ANONYMOUS | MAP_PRIVATE);
     }
   private:
     void destroy() {
       if( maping ) {
-        //if( mlocked )
-        //  munlock(maping, size);
+        if( mlocked )
+          munlock(maping, size);
         munmap(maping, size);
         maping = nullptr;
       }
@@ -150,6 +185,13 @@ namespace detail {
     size_t size = 0;
     bool mlocked = false;
   };
+
+  // useful for Linux with manual TransparentHugePages enabled via:
+  // $ echo madvise > /sys/kernel/mm/transparent_hugepage/enabled
+  // even if no HugePages are available now either not enabled
+  // your code shall work as is, but w/o performance benefits from HugePages
+  using THugePagesMMapWriter = MMapWriterImpl<true>;
+  using MMapWriter = MMapWriterImpl<false>;
 
 } // namespace detail
 
@@ -541,9 +583,7 @@ protected:
   }
 };
 
-
-template<typename S, typename T, typename Distance, typename DataMapper = MMapDataMapper, 
-  template<class> class RAlloc = std::allocator >
+template<typename S, typename T, typename Distance, typename DataMapper = MMapDataMapper>
 class PackedAnnoySearcher {
     /*
      This is AnnoyIndex class divided into indexer and searcher
@@ -552,7 +592,7 @@ class PackedAnnoySearcher {
      Also this two classes provided different nodes packing scheme
      including float[-1:+1] to uint16 pack
      Some stats: packs about to 1.8x or more of original annoy index!
-     INFO: you can bypass more dTLB misses when using HugePages allocator 
+     INFO: you can bypass more dTLB misses when using HugePages allocator
            for your storage or/and temporary buffers via custom RAlloc.
            see: clone() and other examples.
    */
@@ -570,8 +610,8 @@ public:
         return true;
       }
   };
-  typedef std::pair<T, S>                       qpair_t;
-  typedef std::vector<qpair_t, RAlloc<qpair_t>> queue_t;
+  typedef std::pair<T, S>      qpair_t;
+  typedef std::vector<qpair_t> queue_t;
 private:
   static constexpr S const _K_mask = S(1UL) << S(sizeof(S) * 8 - 1);
   static constexpr S const _K_mask_clear = _K_mask - 1;
@@ -682,7 +722,7 @@ public:
   // this function useful in several cases:
   // 1. exclude huge coredump via MADV_DONTDUMP.
   // 2. preload from storage into memory via MADV_WILLNEED.
-  // 3. use THP if you disable it on your system via MADV_HUGEPAGE.
+  // 3. use THP if you enabled manual mode in your system via MADV_HUGEPAGE.
   // 4. something special ;)
   bool madvise(int flags) const {
       return ::madvise(const_cast<void*>(_mapping.data), _mapping.size, flags) == 0;
@@ -790,12 +830,8 @@ private:
                     Filter filter) const {
     if (search_k == (S)-1)
       search_k = n * _roots_q.size(); // slightly arbitrary default value
-    // get memory from the same allocator as queue buffer
-    // to reduce dTLB misses YOU can use special THP allocator
-    // to feet all temporary data into one page!
-    RAlloc<S> alloc;
     size_t const max_nns_elements = search_k + _K * 2;
-    S *nns = alloc.allocate(max_nns_elements);
+    S *nns = static_cast<S*>(alloca_aligned(max_nns_elements * sizeof(S)));
     queue_t &q = nns_dist;
     // copy prepared queue with roots
     q.reserve( std::max(n * _roots_q.size(), max_nns_elements) );
@@ -828,9 +864,9 @@ private:
         // index only node
         S const *idx = (S const*)_mapping.data + i * _K;
         S const *src_i = idx + 1;
-        void *dest = &nns[nns_cnt];
+        S *dest = &nns[nns_cnt];
         nns_cnt += *idx;
-        memcpy(dest, src_i, *idx * sizeof(S));
+        copy_indices(dest, src_i, *idx);
       }
       if( nns_cnt >= search_k )
         break;
@@ -857,8 +893,6 @@ private:
           nns_dist.emplace_back(dist, j);
       }
     }
-
-    alloc.deallocate(nns, max_nns_elements);
 
     // resort by distance ?
     if( Filter::resort_by_distance )

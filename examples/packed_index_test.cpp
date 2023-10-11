@@ -16,6 +16,9 @@
 #include <string>
 #include <algorithm>
 
+
+using FVEC = std::vector<float, Annoy::AlignedAlloc<float> >;
+
 template<typename T>
 bool is_near
 (
@@ -38,7 +41,7 @@ static float frand()
     return std::rand() / (float)RAND_MAX;
 }
 
-float vlength( std::vector<float> const &v )
+float vlength( FVEC const &v )
 {
     float sum = 0.f;
 
@@ -60,15 +63,15 @@ float vlength( float const *v, uint32_t d )
 }
 
 
-void normalize( float const length, std::vector<float> &v )
+void normalize( float const length, FVEC &v )
 {
     for( float &f : v )
         f /= length;
 }
 
-static std::vector<float> GenerateVectorNorm( size_t n, float lo, float hi )
+static FVEC GenerateVectorNorm( size_t n, float lo, float hi )
 {
-    std::vector<float> v(n);
+    FVEC v(n);
     float len;
     do
     {
@@ -346,7 +349,7 @@ static double in_mem_test(int f, int k, uint32_t count, int depth = 30, bool clo
 
     // make index into memory block
 
-    detail::MMapWriter loader_n_writer;
+    detail::THugePagesMMapWriter loader_n_writer;
     {
         PackedAnnoyIndexer<uint32_t, float, typename DistT::UnpackedT, Kiss32Random> indexer(f, k);
         indexer.verbose(true);
@@ -365,7 +368,7 @@ static double in_mem_test(int f, int k, uint32_t count, int depth = 30, bool clo
     }
 
     // and load from the same memory block
-    using Searcher = PackedAnnoySearcher<uint32_t, float, DistT, detail::MMapWriter>;
+    using Searcher = PackedAnnoySearcher<uint32_t, float, DistT, detail::THugePagesMMapWriter>;
 
     Searcher searcher(std::move(loader_n_writer));
 
@@ -416,7 +419,7 @@ void basic_packutils_test()
     {
         std::cout << "performing basic utils test for width: " << D << std::endl;
         // renormalize vector
-        std::vector<float> tvv(test_vector, test_vector + D);
+        FVEC tvv(test_vector, test_vector + D);
         float const *test_vector = tvv.data();
         float vlen = vlength(tvv);
         size_t const sz_packed = sizeof(uint16_t) * D;

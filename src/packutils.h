@@ -30,11 +30,109 @@
 
 namespace Annoy {
 
+inline void* aligned_malloc( size_t sz, size_t alignment = 16 )
+{
+    void *out_bytes;
+    if( posix_memalign(&out_bytes, alignment, sz) )
+        throw std::bad_alloc();
+
+    return out_bytes;
+}
+
+/* YOU must always align your data to the corresponding alignment!!! */
+template<typename T>
+class AlignedAlloc
+{
+public:
+    typedef T               value_type;
+    typedef T*              pointer;
+    typedef T const*        const_pointer;
+    typedef T&              reference;
+    typedef T const&        const_reference;
+    typedef std::size_t     size_type;
+    typedef std::ptrdiff_t  difference_type;
+public:
+    // rebind allocator to type U
+    template <class U>
+    struct rebind {
+        typedef AlignedAlloc<U> other;
+    };
+
+    // return address of values
+    pointer address( reference value ) const
+    {
+        return &value;
+    }
+
+    const_pointer address( const_reference value ) const
+    {
+        return &value;
+    }
+
+    /* constructors and destructor
+    * - nothing to do because the allocator has no state
+    */
+    AlignedAlloc() {}
+    AlignedAlloc( AlignedAlloc const& ) noexcept {}
+
+    template <typename U>
+    AlignedAlloc( AlignedAlloc<U> const& )  noexcept {}
+    ~AlignedAlloc() {}
+
+    // return maximum number of elements that can be allocated
+    size_type max_size() const
+    {
+        return std::numeric_limits<std::size_t>::max() / sizeof(T);
+    }
+
+    // allocate but don't initialize num elements of type T
+    pointer allocate( size_type num, void const * = nullptr )
+    {
+        return (pointer)aligned_malloc(num * sizeof(T), 64); // always align to cache line size
+    }
+
+    // initialize elements of allocated storage p with value value
+    void construct (pointer p, T const &value)
+    {
+        // initialize memory with placement new
+        new((void*)p)T(value);
+    }
+
+    // destroy elements of initialized storage p
+    void destroy( pointer p )
+    {
+        // destroy objects by calling their destructor
+        p->~T();
+    }
+
+    // deallocate storage p of deleted elements
+    void deallocate( pointer p, size_type num ) noexcept
+    {
+        free(p);
+    }
+};
+
+// return that all specializations of this allocator are interchangeable
+template <class T1, class T2>
+bool operator == ( AlignedAlloc<T1> const&, AlignedAlloc<T2> const& )
+{
+    return true;
+}
+
+template <class T1, class T2>
+bool operator != ( AlignedAlloc<T1> const&, AlignedAlloc<T2> const& )
+{
+    return false;
+}
+
+static float const C_MUL = 32767.f;
+static float const C_IMUL = 1.f / C_MUL;
+
 #if defined(USE_AVX512)
 
 inline void pack_float_vector_i16_avx32( float const *__restrict__ x, uint16_t *__restrict__ out, uint32_t d )
 {
-  __m512 mm1 = _mm512_set1_ps(32767.f);
+  __m512 mm1 = _mm512_set1_ps(C_MUL);
   __m512i perm = _mm512_set_epi64(7, 5, 3, 1, 6, 4, 2, 0);
   while( d >= 32 )
   {
@@ -51,7 +149,7 @@ inline void pack_float_vector_i16_avx32( float const *__restrict__ x, uint16_t *
 
   while( d )
   {
-    __m128 m1 = _mm_set1_ps(32767.f);
+    __m128 m1 = _mm_broadcast_ss(&C_MUL);
     __m128 a = _mm_loadu_ps(x);
     __m128 b = _mm_loadu_ps(x + 4);
     __m128i ai = _mm_cvtps_epi32(_mm_mul_ps(a, m1));
@@ -65,7 +163,7 @@ inline void pack_float_vector_i16_avx32( float const *__restrict__ x, uint16_t *
 
 inline void decode_vector_i16_f32_avx32( uint16_t const *__restrict__ in, float *__restrict__ out, uint32_t d )
 {
-  __m512 mm1 = _mm512_set1_ps(1.f / 32767.f);
+  __m512 mm1 = _mm512_set1_ps(C_IMUL);
   while( d >= 32 )
   {
       __m512i s  = _mm512_loadu_si512( (__m512i const*)(in) );
@@ -82,7 +180,7 @@ inline void decode_vector_i16_f32_avx32( uint16_t const *__restrict__ in, float 
 
   while( d )
   {
-      __m128 m1 = _mm_set1_ps(1.f / 32767.f);
+      __m128 m1 = _mm_broadcast_ss(&C_IMUL);
       __m128i s  = _mm_loadu_si128( (__m128i const*)(in) );
       __m128i ai = _mm_srai_epi32(_mm_unpacklo_epi16(s, s), 16);
       __m128i bi = _mm_srai_epi32(_mm_unpackhi_epi16(s, s), 16);
@@ -99,7 +197,7 @@ inline void decode_vector_i16_f32_avx32( uint16_t const *__restrict__ in, float 
 inline float decode_and_dot_i16_f32_avx32( uint16_t const *__restrict__ in, float const *__restrict__ y, uint32_t d )
 {
   float sum;
-  __m512 mm1 = _mm512_set1_ps(1.f / 32767.f);
+  __m512 mm1 = _mm512_set1_ps(C_IMUL);
   __m512 msum1 = _mm512_setzero_ps(), msum2 = _mm512_setzero_ps();
   __m512 mx, my;
   while( d >= 32 )
@@ -127,7 +225,7 @@ inline float decode_and_dot_i16_f32_avx32( uint16_t const *__restrict__ in, floa
   {
     // every step decoded into 8 floats
     // use here slow _mm_dp_ps instruction since is no loop here
-    __m128 m1 = _mm_set1_ps(1.f / 32767.f);
+    __m128 m1 = _mm_broadcast_ss(&C_IMUL);
     __m128i s  = _mm_load_si128( (__m128i const*)(in) );
     __m128i ai = _mm_srai_epi32(_mm_unpacklo_epi16(s, s), 16);
     __m128 a = _mm_mul_ps(_mm_cvtepi32_ps(ai), m1);
@@ -150,7 +248,7 @@ inline float decode_and_dot_i16_f32_avx32( uint16_t const *__restrict__ in, floa
 inline float decode_and_euclidean_distance_i16_f32_avx32( uint16_t const *__restrict__ in, float const *__restrict__ y, uint32_t d )
 {
   float sum;
-  __m512 mm1 = _mm512_set1_ps(1.f / 32767.f);
+  __m512 mm1 = _mm512_set1_ps(C_IMUL);
   __m512 msum1 = _mm512_setzero_ps(), msum2 = _mm512_setzero_ps();
   __m512 mx, my;
   while( d >= 32 )
@@ -179,7 +277,7 @@ inline float decode_and_euclidean_distance_i16_f32_avx32( uint16_t const *__rest
   // here can be 0/8/16/24 left, so do check and calc tail if exists
   while( d )
   {
-    __m128 m1 = _mm_set1_ps(1.f / 32767.f);
+    __m128 m1 = _mm_broadcast_ss(&C_IMUL);
     __m128 msum1 = _mm_setzero_ps();
     __m128 mx, my;
     __m128i s  = _mm_load_si128( (__m128i const*)(in) );
@@ -218,7 +316,7 @@ inline float _mm256_reduce_add_ps(__m256 x) {
 
 inline void pack_float_vector_i16_avx16( float const *__restrict__ x, uint16_t *__restrict__ out, uint32_t d )
 {
-  __m256 mm1 = _mm256_set1_ps(32767.f);
+  __m256 mm1 = _mm256_broadcast_ss(&C_MUL);
   while( d >= 16 )
   {
       __m256 a = _mm256_loadu_ps(x);
@@ -234,7 +332,7 @@ inline void pack_float_vector_i16_avx16( float const *__restrict__ x, uint16_t *
 
   if( d )
   {
-    __m128 m1 = _mm_set1_ps(32767.f);
+    __m128 m1 = _mm256_castps256_ps128(mm1);
     __m128 a = _mm_loadu_ps(x);
     __m128 b = _mm_loadu_ps(x + 4);
     __m128i ai = _mm_cvtps_epi32(_mm_mul_ps(a, m1));
@@ -245,7 +343,7 @@ inline void pack_float_vector_i16_avx16( float const *__restrict__ x, uint16_t *
 
 inline void decode_vector_i16_f32_avx16( uint16_t const *__restrict__ in, float *__restrict__ out, uint32_t d )
 {
-  __m256 mm1 = _mm256_set1_ps(1.f / 32767.f);
+  __m256 mm1 = _mm256_broadcast_ss(&C_IMUL);
   while( d >= 16 )
   {
       __m256i s  = _mm256_loadu_si256( (__m256i const*)(in) );
@@ -261,7 +359,7 @@ inline void decode_vector_i16_f32_avx16( uint16_t const *__restrict__ in, float 
   }
   if( d )
   {
-      __m128 m1 = _mm_set1_ps(1.f / 32767.f);
+      __m128 m1 = _mm256_castps256_ps128(mm1);
       __m128i s  = _mm_loadu_si128( (__m128i const*)(in) );
       __m128i ai = _mm_srai_epi32(_mm_unpacklo_epi16(s, s), 16);
       __m128i bi = _mm_srai_epi32(_mm_unpackhi_epi16(s, s), 16);
@@ -275,7 +373,7 @@ inline void decode_vector_i16_f32_avx16( uint16_t const *__restrict__ in, float 
 inline float decode_and_dot_i16_f32_avx16( uint16_t const *__restrict__ in, float const *__restrict__ y, uint32_t d )
 {
   float sum;
-  __m256 mm1 = _mm256_set1_ps(1.f / 32767.f);
+  __m256 mm1 = _mm256_broadcast_ss(&C_IMUL);
   __m256 msum1 = _mm256_setzero_ps(), msum2 = _mm256_setzero_ps();
   __m256 mx, my;
   while( d >= 16 )
@@ -283,7 +381,7 @@ inline float decode_and_dot_i16_f32_avx16( uint16_t const *__restrict__ in, floa
       // every step decoded into 16 floats
       // sadly but we need to use here unaligned load
       // due to 16 byte offset for vector, not 32 byte!
-      __m256i s  = _mm256_lddqu_si256( (__m256i const*)(in) );
+      __m256i s  = _mm256_loadu_si256( (__m256i const*)(in) );
       __m256i ai = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(s));
       __m256 a = _mm256_mul_ps(_mm256_cvtepi32_ps(ai), mm1);
       mx = _mm256_load_ps(y);
@@ -303,7 +401,7 @@ inline float decode_and_dot_i16_f32_avx16( uint16_t const *__restrict__ in, floa
   {
     // every step decoded into 8 floats
     // use here slow _mm_dp_ps instruction since is no loop here
-    __m128 m1 = _mm_set1_ps(1.f / 32767.f);
+    __m128 m1 = _mm256_castps256_ps128(mm1);
     __m128i s  = _mm_load_si128( (__m128i const*)(in) );
     __m128i ai = _mm_srai_epi32(_mm_unpacklo_epi16(s, s), 16);
     __m128 a = _mm_mul_ps(_mm_cvtepi32_ps(ai), m1);
@@ -323,7 +421,7 @@ inline float decode_and_dot_i16_f32_avx16( uint16_t const *__restrict__ in, floa
 inline float decode_and_euclidean_distance_i16_f32_avx16( uint16_t const *__restrict__ in, float const *__restrict__ y, uint32_t d )
 {
   float sum;
-  __m256 mm1 = _mm256_set1_ps(1.f / 32767.f);
+  __m256 mm1 = _mm256_broadcast_ss(&C_IMUL);
   __m256 msum1 = _mm256_setzero_ps(), msum2 = _mm256_setzero_ps();
   __m256 mx, my;
   while( d >= 16 )
@@ -331,15 +429,15 @@ inline float decode_and_euclidean_distance_i16_f32_avx16( uint16_t const *__rest
       // every step decoded into 16 floats
       // sadly but we need to use here unaligned load
       // due to 16 byte offset for vector, not 32 byte!
-      __m256i s  = _mm256_lddqu_si256( (__m256i const*)(in) );
+      __m256i s  = _mm256_loadu_si256( (__m256i const*)(in) );
       __m256i ai = _mm256_cvtepi16_epi32(_mm256_castsi256_si128(s));
       __m256 a = _mm256_mul_ps(_mm256_cvtepi32_ps(ai), mm1);
-      mx = _mm256_loadu_ps(y);
+      mx = _mm256_load_ps(y);
       __m256i bi = _mm256_cvtepi16_epi32(_mm256_extracti128_si256(s, 1));
       __m256 d1 = _mm256_sub_ps (a, mx);
       msum1 = _mm256_fmadd_ps (d1, d1, msum1);
       __m256 b = _mm256_mul_ps(_mm256_cvtepi32_ps(bi), mm1);
-      my = _mm256_loadu_ps(y + 8);
+      my = _mm256_load_ps(y + 8);
       __m256 d2 = _mm256_sub_ps (b, my);
       msum2 = _mm256_fmadd_ps (d2, d2, msum2);
       in += 16;
@@ -352,7 +450,7 @@ inline float decode_and_euclidean_distance_i16_f32_avx16( uint16_t const *__rest
   // here can be 0/8 left, so do check and calc tail if exists
   if( d )
   {
-    __m128 m1 = _mm_set1_ps(1.f / 32767.f);
+    __m128 m1 = _mm256_castps256_ps128(mm1);
     __m128 msum1 = _mm_setzero_ps();
     __m128 mx, my;
     __m128i s  = _mm_load_si128( (__m128i const*)(in) );
@@ -379,7 +477,7 @@ inline float decode_and_euclidean_distance_i16_f32_avx16( uint16_t const *__rest
 
 inline void pack_float_vector_i16_sse( float const *__restrict__ x, uint16_t *__restrict__ out, uint32_t d )
 {
-  __m128 m1 = _mm_set1_ps(32767.f);
+  __m128 m1 = _mm_set1_ps(C_MUL);
   for( uint32_t i = 0; i < d; i += 8 )
   {
     __m128 a = _mm_loadu_ps(x + i);
@@ -395,7 +493,7 @@ inline void pack_float_vector_i16_sse( float const *__restrict__ x, uint16_t *__
 
 inline void decode_vector_i16_f32_sse( uint16_t const *__restrict__ in, float *__restrict__ out, uint32_t d )
 {
-  __m128 m1 = _mm_set1_ps(1.f / 32767.f);
+  __m128 m1 = _mm_set1_ps(C_IMUL);
   // every step decoded into 8 float at once!
   for( uint32_t i = 0; i < d; i += 8 )
   {
@@ -411,7 +509,7 @@ inline void decode_vector_i16_f32_sse( uint16_t const *__restrict__ in, float *_
 
 inline float decode_and_dot_i16_f32_sse( uint16_t const *__restrict__ in, float const *__restrict__ y, uint32_t d )
 {
-  __m128 m1 = _mm_set1_ps(1.f / 32767.f);
+  __m128 m1 = _mm_set1_ps(C_IMUL);
   __m128 msum1 = _mm_setzero_ps(), msum2 = _mm_setzero_ps();
   __m128 mx, my;
   // every step decoded into 8 float at once!
@@ -440,7 +538,7 @@ inline float decode_and_dot_i16_f32_sse( uint16_t const *__restrict__ in, float 
 
 inline float decode_and_euclidean_distance_i16_f32_sse( uint16_t const *__restrict__ in, float const *__restrict__ y, uint32_t d )
 {
-  __m128 m1 = _mm_set1_ps(1.f / 32767.f);
+  __m128 m1 = _mm_set1_ps(C_IMUL);
   __m128 msum1 = _mm_setzero_ps(), msum2 = _mm_setzero_ps();
   __m128 mx, my;
   // every step decoded into 8 float at once!
@@ -469,6 +567,29 @@ inline float decode_and_euclidean_distance_i16_f32_sse( uint16_t const *__restri
   return  _mm_cvtss_f32 (msum1);
 }
 
+template<bool Aligned>
+inline void copy_indices_16b_sse( void *dst, void const *src, size_t n )
+{
+  // copy as 16 byte chunks with overcopying: user must setup their buffers properly
+  // align size to 16!
+  n = ((n - 1) | 0xf) + 1;
+  auto *dVec = (__m128i *)(dst);
+  auto *sVec = (__m128i *)(src);
+  for (; n > 0; n -= 16, sVec++, dVec++)
+  {
+    __m128i const temp = Aligned ? _mm_stream_load_si128(sVec) : _mm_loadu_si128(sVec);
+    _mm_storeu_si128(dVec, temp);
+  }
+}
+
+template<typename S>
+inline void copy_indices( S *dst, S const *src, size_t n )
+{
+  if( size_t(src) & 0xf )
+    copy_indices_16b_sse<false>(dst, src, sizeof(S) * n);
+  else
+    copy_indices_16b_sse<true>(dst, src, sizeof(S) * n);
+}
 
 // stub static selectors
 
