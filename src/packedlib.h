@@ -124,7 +124,7 @@ namespace detail {
             maping = p;
         }
 #if defined(MADV_HUGEPAGE)
-        madvise(p, calculated_size, MADV_HUGEPAGE);
+        madvise(p, size, MADV_HUGEPAGE);
 #endif
       }
       else {
@@ -132,11 +132,6 @@ namespace detail {
         top = static_cast<uint8_t*>(p);
         size = sz;
       }
-#if defined(MADV_HUGEPAGE)
-      if( THP )
-        madvise(p, calculated_size, MADV_HUGEPAGE);
-#endif
-
 #if defined(MADV_DONTDUMP)
       // Exclude from a core dump those pages
       if (p != nullptr)
