@@ -135,7 +135,7 @@ namespace detail {
 #if defined(MADV_DONTDUMP)
       // Exclude from a core dump those pages
       if (p != nullptr)
-        madvise(p, calculated_size, MADV_DONTDUMP);
+        madvise(p, size, MADV_DONTDUMP);
 #endif
       return true;
     }
